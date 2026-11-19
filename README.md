@@ -10,12 +10,13 @@ A quiet, offline voice-notes app. One big mic button, no account, no typing, no 
 
 ## Download the APK
 
-1. Open the **Actions** tab of this repository.
-2. Pick the latest **Build Android APK** run.
-3. Download **KothaNote-APK** from *Artifacts*.
-4. Unzip it and install `KothaNote-debug.apk` on the phone (allow "Install unknown apps" for the browser/file manager you use).
+1. Open the **Releases** tab of this repository (or click **Releases → KothaNote latest APK**).
+2. Download **`KothaNote-debug.apk`** from the latest release.
+3. Install it on the phone (allow "Install unknown apps" for the browser/file manager you use).
 
-The workflow builds on **every push** and can also be started manually from **Actions → Build Android APK → Run workflow**.
+The release asset is replaced on every successful build, so the same link always gives the newest APK.
+
+The workflow builds on **every push** and can also be started manually from **Actions → Build Android APK → Run workflow**. When the account's Actions artifact storage is available, the same APK is also attached to the run as the **KothaNote-APK** artifact.
 
 ## What is in this demo
 

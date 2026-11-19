@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -55,10 +55,30 @@ jobs:
       - name: Prepare artifact
         run: cp app/build/outputs/apk/debug/app-debug.apk KothaNote-debug.apk
 
-      - name: Upload APK
+      - name: Upload APK artifact
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: KothaNote-APK
           path: KothaNote-debug.apk
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 7
+
+      - name: Publish APK release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view latest --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload latest KothaNote-debug.apk --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit latest --repo "$GITHUB_REPOSITORY" \
+              --notes "Built from \`$GITHUB_SHA\` on $(date -u +'%Y-%m-%d %H:%M UTC')."
+          else
+            gh release create latest KothaNote-debug.apk \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "KothaNote latest APK" \
+              --notes "Built from \`$GITHUB_SHA\` on $(date -u +'%Y-%m-%d %H:%M UTC')." \
+              --latest
+          fi
+          echo "### APK published" >> "$GITHUB_STEP_SUMMARY"
+          echo "Download: https://github.com/$GITHUB_REPOSITORY/releases/tag/latest" >> "$GITHUB_STEP_SUMMARY"
