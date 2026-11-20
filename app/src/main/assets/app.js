@@ -698,6 +698,10 @@
         saveAudioOnly(res);
         return;
       }
+      if (res && res.error === 'no_speech' && res.file) {
+        saveAudioOnly(res);
+        return;
+      }
       const msg = res && res.error === 'no_speech'
         ? 'No speech was recognised. Try again.'
         : (res && res.message) || 'The recording could not be transcribed.';

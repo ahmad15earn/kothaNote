@@ -1238,13 +1238,23 @@ public class MainActivity extends Activity {
                     setState("ready", 100, "Whisper Tiny · on-device");
                     emitCallback("onTranscriptionResult", result.toString());
                 } catch (NoSpeechException e) {
-                    //noinspection ResultOfMethodCallIgnored
-                    part.delete();
+                    int remainingMs = wavDurationMs(part);
+                    // Keep a real attempt that produced no words instead of
+                    // throwing the recording away. Short blips are discarded.
+                    boolean keepAudio = appendFile == null && remainingMs >= 1500;
+                    if (!keepAudio) {
+                        //noinspection ResultOfMethodCallIgnored
+                        part.delete();
+                    }
                     JSONObject result = new JSONObject();
                     try {
                         result.put("ok", false);
                         result.put("error", "no_speech");
                         result.put("message", "No speech was recognised. Try again.");
+                        if (keepAudio) {
+                            result.put("file", part.getName());
+                            result.put("durationMs", remainingMs);
+                        }
                     } catch (Exception ignored) {
                     }
                     setState("ready", 100, "Whisper Tiny · on-device");
@@ -1616,12 +1626,10 @@ public class MainActivity extends Activity {
                 new FileOutputStream(file))) {
             out.write(wavHeader(samples.length * 2L, sampleRate, 1, 16));
             byte[] buffer = new byte[8192];
-            int index = 0;
             int offset = 0;
             for (short sample : samples) {
-                buffer[index++] = (byte) (sample & 0xff);
-                buffer[index++] = (byte) ((sample >> 8) & 0xff);
-                offset += 2;
+                buffer[offset++] = (byte) (sample & 0xff);
+                buffer[offset++] = (byte) ((sample >> 8) & 0xff);
                 if (offset >= buffer.length) {
                     out.write(buffer, 0, offset);
                     offset = 0;
