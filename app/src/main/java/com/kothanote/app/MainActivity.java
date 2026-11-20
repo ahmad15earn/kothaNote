@@ -63,6 +63,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -1295,33 +1296,42 @@ public class MainActivity extends Activity {
             if (current == null) throw new IOException("Speech model is not ready");
 
             // The native Whisper decoder handles at most 30 seconds at a time.
-            // Split longer notes into 28-second pieces so nothing is dropped.
+            // We also cut at long pauses, so each quiet gap becomes a paragraph
+            // in the finished note instead of one wall of text.
             final int chunkSamples = 16000 * 28;
+            List<int[]> segments = speechSegments(all, 16000);
             StringBuilder text = new StringBuilder();
             String detected = "";
 
-            if (all.length <= chunkSamples) {
-                DecodeResult one = decodeChunk(current, all, 0, all.length, lang);
-                text.append(one.text);
-                detected = one.lang;
-            } else {
-                for (int start = 0; start < all.length; start += chunkSamples) {
-                    int end = Math.min(all.length, start + chunkSamples);
+            for (int s = 0; s < segments.size(); s++) {
+                int[] segment = segments.get(s);
+                StringBuilder block = new StringBuilder();
+                for (int start = segment[0]; start < segment[1]; start += chunkSamples) {
+                    int end = Math.min(segment[1], start + chunkSamples);
                     if (end - start < 1600) break;
-                    int pct = Math.min(95, Math.round(start * 100f / all.length));
-                    setState("transcribing", pct, "Transcribing on this device…");
+                    int pct = Math.min(94, Math.round(start * 100f / Math.max(1, all.length)));
+                    setState("transcribing", pct,
+                            s == 0 ? "Listening closely…" : "Writing the note…");
                     DecodeResult part = decodeChunk(current, all, start, end, lang);
                     String cleaned = cleanText(part.text);
                     if (!cleaned.isEmpty()) {
-                        if (text.length() > 0) text.append(' ');
-                        text.append(cleaned);
+                        if (block.length() > 0) block.append(' ');
+                        block.append(cleaned);
                     }
                     if (detected.isEmpty()) detected = part.lang;
                 }
+                String paragraph = cleanText(block.toString());
+                if (!paragraph.isEmpty()) {
+                    if (text.length() > 0) text.append("\n\n");
+                    text.append(paragraph);
+                }
             }
 
+            // Long stretches without a real pause still get readable
+            // paragraphs, grouped at sentence boundaries.
+            setState("transcribing", 96, "Polishing the note…");
             DecodeResult out = new DecodeResult();
-            out.text = text.toString();
+            out.text = formatParagraphs(text.toString());
             out.lang = detected;
             return out;
         }
@@ -1418,6 +1428,178 @@ public class MainActivity extends Activity {
         if (value.length() < 2) return "";
         if (value.matches("^[\\[\\](){}<>.,!?…\\-–—:;'\"\\s]+$")) return "";
         return value;
+    }
+
+    /* ---------------------------------------------------------------------
+       Pause-aware paragraphs
+       --------------------------------------------------------------------- */
+
+    /**
+     * Finds the stretches that actually contain speech. A real pause ends a
+     * paragraph; short breaths inside a sentence do not. The frame level is
+     * adaptive so quiet rooms and noisier rooms both work.
+     */
+    private static List<int[]> speechSegments(short[] samples, int sampleRate) {
+        List<int[]> segments = new ArrayList<>();
+        int count = samples.length;
+        if (count < sampleRate * 3 / 10) return segments;
+
+        int frame = Math.max(1, sampleRate / 50); // 20 ms
+        int frames = count / frame;
+        if (frames < 2) return segments;
+
+        double[] level = new double[frames];
+        List<Double> sorted = new ArrayList<>(frames);
+        for (int f = 0; f < frames; f++) {
+            int start = f * frame;
+            int end = Math.min(count, start + frame);
+            double sum = 0;
+            for (int i = start; i < end; i++) {
+                double sample = samples[i];
+                sum += sample * sample;
+            }
+            level[f] = Math.sqrt(sum / Math.max(1, end - start));
+            sorted.add(level[f]);
+        }
+        Collections.sort(sorted);
+
+        // A fraction of the loud frames is a safer cut-off than the average:
+        // a recording that is nearly all speech would otherwise raise its own
+        // threshold and look silent.
+        double loud = sorted.get(Math.min(sorted.size() - 1,
+                Math.max(0, Math.round(sorted.size() * 0.9f) - 1)));
+        double threshold = Math.max(170.0, Math.min(1200.0, loud * 0.07));
+
+        boolean[] voice = new boolean[frames];
+        int voicedFrames = 0;
+        for (int f = 0; f < frames; f++) {
+            voice[f] = level[f] > threshold;
+            if (voice[f]) voicedFrames++;
+        }
+        if (voicedFrames < 3) return segments;
+
+        int gapFrames = Math.max(1, Math.round(sampleRate * 0.9f / frame));
+        List<int[]> gaps = new ArrayList<>();
+        int f = 0;
+        while (f < frames) {
+            if (voice[f]) {
+                f++;
+                continue;
+            }
+            int start = f;
+            while (f < frames && !voice[f]) f++;
+            if (f - start >= gapFrames) gaps.add(new int[]{start, f});
+        }
+        // A long note with many pauses should not turn into hundreds of
+        // decoder calls; the longest pauses win.
+        if (gaps.size() > 29) {
+            gaps.sort((a, b) -> Integer.compare(b[1] - b[0], a[1] - a[0]));
+            gaps = new ArrayList<>(gaps.subList(0, 29));
+            gaps.sort((a, b) -> Integer.compare(a[0], b[0]));
+        }
+
+        int pad = Math.round(sampleRate * 0.15f);
+        int cursor = 0;
+        List<int[]> bounds = new ArrayList<>(gaps.size() + 1);
+        for (int[] gap : gaps) {
+            bounds.add(new int[]{(gap[0] + gap[1]) / 2});
+        }
+        bounds.add(new int[]{frames});
+
+        for (int[] bound : bounds) {
+            int stop = bound[0];
+            int first = -1;
+            int last = -1;
+            for (int i = cursor; i < stop; i++) {
+                if (!voice[i]) continue;
+                if (first < 0) first = i;
+                last = i;
+            }
+            cursor = stop;
+            if (first < 0) continue;
+            int startSample = Math.max(0, first * frame - pad);
+            int endSample = Math.min(count, (last + 1) * frame + pad);
+            if (endSample - startSample >= sampleRate * 35 / 100) {
+                segments.add(new int[]{startSample, endSample});
+            }
+        }
+        return segments;
+    }
+
+    /** Re-flow a transcript into paragraphs of whole sentences. */
+    private static String formatParagraphs(String raw) {
+        if (raw == null || raw.isEmpty()) return "";
+        String[] blocks = raw.split("\\n\\s*\\n");
+        StringBuilder out = new StringBuilder();
+        for (String block : blocks) {
+            String cleaned = cleanText(block);
+            if (cleaned.isEmpty()) continue;
+            List<String> sentences = splitSentences(cleaned);
+            StringBuilder paragraph = new StringBuilder();
+            for (String sentence : sentences) {
+                if (paragraph.length() > 0
+                        && paragraph.length() + 1 + sentence.length() > 340) {
+                    appendParagraph(out, paragraph);
+                    paragraph.setLength(0);
+                }
+                if (paragraph.length() > 0) paragraph.append(' ');
+                paragraph.append(sentence);
+            }
+            appendParagraph(out, paragraph);
+        }
+        return out.toString();
+    }
+
+    private static void appendParagraph(StringBuilder out, StringBuilder paragraph) {
+        if (paragraph.length() == 0) return;
+        if (out.length() > 0) out.append("\n\n");
+        out.append(paragraph);
+    }
+
+    private static List<String> splitSentences(String block) {
+        List<String> sentences = new ArrayList<>();
+        int start = 0;
+        for (int i = 0; i < block.length(); i++) {
+            char c = block.charAt(i);
+            if (c != '.' && c != '!' && c != '?' && c != '।') continue;
+            if (c == '.' && i + 1 < block.length()
+                    && Character.isDigit(block.charAt(i + 1))) {
+                continue; // 3.5, 10.30
+            }
+            int end = i + 1;
+            while (end < block.length()) {
+                char next = block.charAt(end);
+                if (next == '"' || next == '\'' || next == ')' || next == ']'
+                        || next == '”' || next == '’') {
+                    end++;
+                } else {
+                    break;
+                }
+            }
+            if (end < block.length() && !Character.isWhitespace(block.charAt(end))) continue;
+            String prefix = block.substring(start, i).trim();
+            int space = prefix.lastIndexOf(' ');
+            String word = (space >= 0 ? prefix.substring(space + 1) : prefix)
+                    .toLowerCase(Locale.US);
+            if (c == '.' && isAbbreviation(word)) continue;
+            sentences.add(block.substring(start, end).trim());
+            start = end;
+            i = end - 1;
+        }
+        String tail = block.substring(start).trim();
+        if (!tail.isEmpty()) sentences.add(tail);
+        return sentences;
+    }
+
+    private static boolean isAbbreviation(String word) {
+        switch (word) {
+            case "mr": case "mrs": case "ms": case "dr": case "prof":
+            case "sr": case "jr": case "st": case "vs": case "etc":
+            case "fig": case "no":
+                return true;
+            default:
+                return false;
+        }
     }
 
     private static String friendlySpeechError(Throwable t) {

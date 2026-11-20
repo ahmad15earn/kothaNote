@@ -102,6 +102,7 @@ html.native .rtop{padding-top:16px}
   padding:48px 16px 0 24px;flex:none;
 }
 h1,h2{font-weight:500;font-size:32px;line-height:1.15;letter-spacing:-.02em;margin:0}
+#homeTitle{overflow-wrap:anywhere;padding-right:8px}
 .sub{color:var(--mute);font-size:14px;padding:4px 24px 0;min-height:24px;flex:none}
 #home.intro h1{animation:rise .8s .18s var(--ease) both}
 #home.intro .sub{animation:rise .8s .32s var(--ease) both}
@@ -207,7 +208,7 @@ h1,h2{font-weight:500;font-size:32px;line-height:1.15;letter-spacing:-.02em;marg
 .lbl{font-size:12px;letter-spacing:.04em;text-transform:uppercase;color:var(--mute);margin-bottom:8px}
 .tx{
   margin:0;line-height:1.85;user-select:text;-webkit-user-select:text;
-  overflow-wrap:anywhere;
+  overflow-wrap:anywhere;white-space:pre-line;
 }
 .tx.bn{line-height:2.05}
 
@@ -232,6 +233,26 @@ h1,h2{font-weight:500;font-size:32px;line-height:1.15;letter-spacing:-.02em;marg
   font-size:14px;font-weight:500;margin:24px 0 16px;
 }
 .note{color:var(--mute);font-size:12px;line-height:1.7;text-align:center;padding:16px 16px 0;margin:0}
+.nameIn{
+  width:100%;height:48px;border:0;border-radius:14px;background:var(--card);
+  padding:0 16px;font:inherit;font-size:15px;color:var(--ink);
+}
+.nameIn::placeholder{color:var(--mute)}
+.nameIn:focus{outline:2px solid var(--ink);outline-offset:-2px}
+.usage{margin:24px 0 0;padding:16px 16px 14px;border-radius:20px;background:var(--card)}
+.uhead{display:flex;justify-content:space-between;align-items:baseline;gap:12px;font-size:14px}
+.uhead span:last-child{color:var(--mute);font-size:12px;text-align:right}
+.uchart{display:flex;align-items:flex-end;gap:10px;height:100px;margin-top:16px}
+.uday{flex:1;height:100%;display:flex;flex-direction:column;align-items:center;gap:7px;min-width:0}
+.uday .track{flex:1;width:100%;display:flex;align-items:flex-end}
+.uday .fill{
+  width:100%;min-height:4px;border-radius:7px;background:var(--ink);opacity:.16;
+  transition:height .5s var(--ease),opacity .3s;
+}
+.uday.has .fill{opacity:.85}
+.uday.today .fill{background:var(--acc);opacity:1}
+.uday em{font-style:normal;font-size:11px;line-height:1;color:var(--mute)}
+.uday.today em{color:var(--ink);font-weight:500}
 
 /* ---------- recording sheet ---------- */
 .sheet{
@@ -362,7 +383,7 @@ html.reduce-motion .okc path{stroke-dashoffset:0!important}
 <!-- ================= HOME ================= -->
 <section class="screen" id="home" aria-label="Notes">
   <header class="top">
-    <h1>Notes</h1>
+    <h1 id="homeTitle">Notes</h1>
     <button class="ib press" id="openSettings" type="button" aria-label="Settings">
       <svg class="i" aria-hidden="true"><use href="#i-sliders"/></svg>
     </button>
@@ -438,11 +459,19 @@ html.reduce-motion .okc path{stroke-dashoffset:0!important}
   <div class="body">
     <h2>Settings</h2>
     <div class="set col">
+      <span>Your name</span>
+      <input class="nameIn" id="nameIn" type="text" maxlength="28" autocomplete="off"
+             autocapitalize="words" spellcheck="false" placeholder="e.g. Ahmad"
+             aria-label="Your name">
+    </div>
+    <div class="set col">
       <span>Voice language</span>
       <div class="seg" id="segLang" role="group" aria-label="Voice language"></div>
     </div>
-    <div class="set"><span>Speech model</span><span id="modelStatus">Whisper Tiny · on-device</span></div>
-    <div class="set"><span>Stored on this phone</span><span id="stor"></span></div>
+    <div class="usage" aria-label="Notes saved in the last seven days">
+      <div class="uhead"><span>Last 7 days</span><span id="uSum">No notes yet</span></div>
+      <div class="uchart" id="uChart"></div>
+    </div>
     <button class="out press" id="exp" type="button">Export all notes</button>
     <p class="note">Open source · No account · No internet needed.<br>Your notes and recordings never leave this phone.</p>
   </div>

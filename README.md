@@ -39,12 +39,15 @@ account's Actions artifact storage can be full; the release asset is the primary
 ## What works
 
 - Splash, Home, Note detail, Settings, and the bottom-sheet Recording screen
+- A name in Settings; the home screen becomes **Notes of Ahmad** (or the name you type)
+- A seven-day usage chart in Settings, built from the days you saved a note
 - Voice-language switching by swiping the mic pill, or from Settings:
   **বাংলা**, **English**, **Auto** (Whisper detects the language)
 - Real 16-bit mono WAV capture at 16 kHz (or the closest rate the phone supports)
 - Pause/resume without inserting silence into the recording
 - Live level meter driven by microphone amplitude
-- On-device transcription after you stop; long recordings are split into 28-second chunks
+- Careful on-device transcription that cuts at pauses of 0.9 s or more, so every natural
+  break becomes a paragraph; long speeches are still split into 28-second decoder chunks
 - Audio-only notes are kept when the speech model cannot produce text
 - 44-bar seekable player, playback speed, copy, native Android share
 - Category changes, appending a new recording to an existing note
@@ -53,9 +56,10 @@ account's Actions artifact storage can be full; the release asset is the primary
 - Export writes a UTF-8 text file through MediaStore on Android 10+ and through the legacy
   Downloads permission on Android 7–9
 
-The first transcription can take a few seconds while the 100 MB model is loaded. Later notes
-are faster. Bengali accuracy from Whisper Tiny is usable but not perfect; the original audio is
-always kept so you can play it back.
+Transcription is deliberately not instant: pause-aware paragraphs need one decoder pass per
+spoken stretch, and that extra work is what keeps the notes readable. The first note also
+waits for the 100 MB model to load. Bengali accuracy from Whisper Tiny is usable but not
+perfect; the original audio is always kept so you can play it back.
 
 ## Permissions
 

@@ -14,6 +14,8 @@
   const LANGS = { bn: 'বাংলা', en: 'English', auto: 'Auto' };
   const NOTE_KEY = 'kothanote.notes.v2';
   const LANG_KEY = 'kothanote.lang.v1';
+  const PROFILE_KEY = 'kothanote.profile.v1';
+  const USAGE_KEY = 'kothanote.usage.v1';
   const AUDIO_RE = /^[A-Za-z0-9._-]{1,90}\.wav$/;
 
   const hasNative = () => {
@@ -91,6 +93,49 @@
   }
 
   const noteById = id => notes.find(n => n.id === id);
+
+  /* ---------- profile ---------- */
+  function cleanName(value) {
+    return String(value || '').replace(/\s+/g, ' ').trim().slice(0, 28);
+  }
+  let profileName = '';
+  try {
+    const saved = JSON.parse(storeGet(PROFILE_KEY) || '{}');
+    if (saved && typeof saved.name === 'string') profileName = cleanName(saved.name);
+  } catch (e) {}
+
+  /* ---------- usage log ---------- */
+  const pad2 = n => String(n).padStart(2, '0');
+  const dayKey = t => {
+    const d = new Date(t);
+    return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+  };
+  let usage = {};
+  try {
+    const saved = JSON.parse(storeGet(USAGE_KEY) || '{}');
+    if (saved && typeof saved === 'object' && !Array.isArray(saved)) {
+      Object.keys(saved).forEach(k => {
+        const value = Number(saved[k]);
+        if (value > 0) usage[k] = Math.floor(value);
+      });
+    }
+  } catch (e) {}
+  // First run after an upgrade: seed the graph from the notes that already
+  // exist, then keep a separate log so deleting a note does not erase the
+  // record of having used the app that day.
+  if (storeGet(USAGE_KEY) === null) {
+    notes.forEach(n => {
+      const k = dayKey(n.t);
+      usage[k] = (usage[k] || 0) + 1;
+    });
+    storeSet(USAGE_KEY, JSON.stringify(usage));
+  }
+  function bumpUsage() {
+    const k = dayKey(Date.now());
+    usage[k] = (usage[k] || 0) + 1;
+    storeSet(USAGE_KEY, JSON.stringify(usage));
+    renderUsage();
+  }
 
   let lang = storeGet(LANG_KEY);
   if (!LANGS[lang]) lang = 'bn';
@@ -257,7 +302,7 @@
     notes.sort((a, b) => b.t - a.t);
     const count = notes.length;
     $('#sub').textContent = count
-      ? count + (count === 1 ? ' note' : ' notes') + ' · stored on this device'
+      ? count + (count === 1 ? ' note' : ' notes') + ' · ' + storageLabel() + ' on this device'
       : '';
     $('#empty').hidden = count > 0;
     $('#fl').hidden = count === 0;
@@ -555,7 +600,7 @@
     paintWave();
     syncPauseUI();
     $('#done').classList.remove('on', 'ok');
-    $('#dmsg').textContent = 'Transcribing on this device…';
+    $('#dmsg').textContent = 'Listening closely…';
     showRecSheet();
     startRecTimer();
 
@@ -602,7 +647,7 @@
 
     rec.stopping = true;
     syncPauseUI();
-    showDone('Transcribing on this device…', false);
+    showDone('Listening closely…', false);
 
     let result = null;
     try { result = nativeJson(window.Android.stopRecording(rec.appendFile)); } catch (e) {}
@@ -665,6 +710,7 @@
     };
     notes.push(n);
     saveNotes();
+    bumpUsage();
     updateStorage();
     showDone('Recording saved without a transcript', true);
     vibrate(10);
@@ -718,10 +764,11 @@
         return;
       }
       const text = (res.text || '').trim();
-      n.x = (n.x ? n.x + ' ' : '') + text;
+      n.x = (n.x ? n.x + '\n\n' : '') + text;
       n.f = res.file || n.f;
       n.d = duration;
       saveNotes();
+      bumpUsage();
       updateStorage();
       homeDirty = true;
       showDone('Added to note', true);
@@ -746,6 +793,7 @@
     };
     notes.push(n);
     saveNotes();
+    bumpUsage();
     updateStorage();
     homeDirty = false;
     showDone('Saved on this phone', true);
@@ -1101,16 +1149,95 @@
   /* =========================================================
      SETTINGS + EXPORT
      ========================================================= */
-  function updateStorage() {
-    const count = notes.length;
+  function storageLabel() {
     let bytes = 0;
     if (NATIVE) {
       try { bytes = Number(window.Android.storageBytes()) || 0; } catch (e) {}
     }
+    if (bytes <= 0) return '0 MB';
     const mb = bytes / (1024 * 1024);
-    let size = '0 MB';
-    if (bytes > 0) size = mb < 0.1 ? '<0.1 MB' : mb.toFixed(1) + ' MB';
-    $('#stor').textContent = count + (count === 1 ? ' note' : ' notes') + ' · ' + size;
+    return mb < 0.1 ? '<0.1 MB' : mb.toFixed(1) + ' MB';
+  }
+
+  function updateStorage() {
+    const el = $('#stor');
+    if (!el) return;
+    const count = notes.length;
+    el.textContent = count + (count === 1 ? ' note' : ' notes') + ' · ' + storageLabel();
+  }
+
+  /* ---------- last 7 days ---------- */
+  function renderUsage() {
+    const chart = $('#uChart');
+    if (!chart) return;
+    const now = new Date();
+    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const days = [];
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date(start.getFullYear(), start.getMonth(), start.getDate() - i);
+      days.push({ d, key: dayKey(d.getTime()), today: i === 0 });
+    }
+    const counts = days.map(x => Number(usage[x.key]) || 0);
+    const total = counts.reduce((sum, value) => sum + value, 0);
+    const max = Math.max(1, ...counts);
+    chart.innerHTML = '';
+    days.forEach((day, i) => {
+      const count = counts[i];
+      const col = document.createElement('div');
+      col.className = 'uday' + (count > 0 ? ' has' : '') + (day.today ? ' today' : '');
+      const track = document.createElement('div');
+      track.className = 'track';
+      const fill = document.createElement('i');
+      fill.className = 'fill';
+      fill.style.height = count > 0
+        ? Math.max(14, Math.round(count / max * 100)) + '%'
+        : '4px';
+      track.appendChild(fill);
+      const label = document.createElement('em');
+      label.textContent = day.d.toLocaleDateString('en-US', { weekday: 'narrow' });
+      const full = day.d.toLocaleDateString('en-US', {
+        weekday: 'long', month: 'short', day: 'numeric'
+      });
+      const text = count + (count === 1 ? ' note' : ' notes');
+      col.title = full + ' — ' + text;
+      col.setAttribute('role', 'img');
+      col.setAttribute('aria-label', full + ', ' + text);
+      col.appendChild(track);
+      col.appendChild(label);
+      chart.appendChild(col);
+    });
+    const sum = $('#uSum');
+    if (sum) sum.textContent = total
+      ? total + (total === 1 ? ' note' : ' notes')
+      : 'No notes yet';
+  }
+
+  /* ---------- name ---------- */
+  const nameIn = $('#nameIn');
+  const homeTitle = $('#homeTitle');
+
+  function syncNameUI() {
+    if (homeTitle) homeTitle.textContent = profileName ? 'Notes of ' + profileName : 'Notes';
+    if (nameIn && document.activeElement !== nameIn) nameIn.value = profileName;
+  }
+
+  if (nameIn) {
+    nameIn.value = profileName;
+    nameIn.addEventListener('input', () => {
+      // Keep the header live while typing, but store the trimmed value.
+      profileName = cleanName(nameIn.value);
+      storeSet(PROFILE_KEY, JSON.stringify({ name: profileName }));
+      syncNameUI();
+    });
+    nameIn.addEventListener('blur', () => {
+      profileName = cleanName(nameIn.value);
+      nameIn.value = profileName;
+      storeSet(PROFILE_KEY, JSON.stringify({ name: profileName }));
+      syncNameUI();
+    });
+    nameIn.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); nameIn.blur(); }
+    });
   }
 
   function exportText() {
@@ -1165,6 +1292,8 @@
 
   function openSettings() {
     updateStorage();
+    syncNameUI();
+    renderUsage();
     syncLangUI();
     $('#settings .body').scrollTop = 0;
     go('settings', 'forward');
@@ -1201,10 +1330,10 @@
       if (status.state === 'transcribing') {
         const pct = Number(status.progress) || 0;
         $('#dmsg').textContent = pct > 0
-          ? 'Transcribing on this device… ' + pct + '%'
-          : 'Transcribing on this device…';
+          ? 'Listening closely… ' + pct + '%'
+          : 'Listening closely…';
       } else if (status.state === 'preparing') {
-        $('#dmsg').textContent = 'Preparing the speech model…';
+        $('#dmsg').textContent = 'Getting ready…';
       }
     }
   };
@@ -1314,6 +1443,8 @@
 
   renderHome();
   updateStorage();
+  syncNameUI();
+  renderUsage();
   if (NATIVE) {
     let status = null;
     try { status = nativeJson(window.Android.speechStatus()); } catch (e) {}
