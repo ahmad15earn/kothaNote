@@ -11,6 +11,14 @@ captures/
 *.keystore
 *.jks
 
+# Keep the stable CI debug key: it makes sideloaded updates installable.
+!app/kothanote-debug.jks
+
+# Speech engine and model binaries are downloaded, never committed.
+# Run scripts/fetch-speech.sh (or scripts/fetch-speech.ps1 on Windows).
+app/libs/*.aar
+app/src/main/assets/asr/*
+
 # IDE
 .idea/
 *.iml

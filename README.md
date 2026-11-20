@@ -3,48 +3,99 @@
 A quiet, offline voice-notes app. One big mic button, no account, no typing, no internet.
 
 - **Android 7.0+** (`minSdk 24`)
-- **No internet permission** — the UI, fonts, and artwork are bundled in the APK
-- **No account, no server** — notes stay on the phone
-- **Light theme only** — Poppins for English, Hind Siliguri for বাংলা
+- **Real microphone recording** with pause and resume
+- **On-device transcription** with Whisper Tiny (int8) through sherpa-onnx
+- **Playback** with seek, 1× / 1.5× / 2× speed, and progress
+- **Append** a new recording to an existing note
+- **Delete with Undo**, category filters, automatic titles, copy and share
+- **Export all text** to `Downloads/KothaNote/`
+- **No internet permission** — the UI, fonts, speech engine, and model are all inside the APK
+- **No account, no server** — notes and recordings stay on the phone
+- Light theme only — Poppins for English, Hind Siliguri for বাংলা
 - White background, ink `#2B2B2B`, muted `#8B8B88`, coral `#FF5A3C`
+
+A fresh install starts with **no sample notes and no placeholder transcripts**. The old demo
+notes are removed on first launch.
 
 ## Download the APK
 
-1. Open the **Releases** tab of this repository (or click **Releases → KothaNote latest APK**).
-2. Download **`KothaNote-debug.apk`** from the latest release.
-3. Install it on the phone (allow "Install unknown apps" for the browser/file manager you use).
+1. Open the **Releases** tab of this repository.
+2. Download **`KothaNote-debug.apk`** from the **latest** release.
+3. Install it on the phone (allow "Install unknown apps" for the browser or file manager).
+4. Optionally compare the download with **`KothaNote-debug.apk.sha256`**.
 
-The release asset is replaced on every successful build, so the same link always gives the newest APK.
+The release asset is replaced on every successful build from `main`, so the same link always
+gives the newest APK. The APK is about **124 MB** because the Whisper Tiny model is bundled and
+kept uncompressed for direct access by the native engine.
 
-The workflow builds on **every push** and can also be started manually from **Actions → Build Android APK → Run workflow**. When the account's Actions artifact storage is available, the same APK is also attached to the run as the **KothaNote-APK** artifact.
+The workflow builds on **every push** and can also be started manually from
+**Actions → Build Android APK → Run workflow**. Run artifacts are best-effort because the
+account's Actions artifact storage can be full; the release asset is the primary download.
 
-## What is in this demo
+> The APK is **debug-signed** with a stable key committed in this repository. That keeps future
+> sideloaded updates installable over each other. If you have the old demo APK installed, uninstall
+> it once, because that build used a different key. This is not a Play Store release.
 
-The visual app is complete:
+## What works
 
 - Splash, Home, Note detail, Settings, and the bottom-sheet Recording screen
-- Voice-language switching by swiping the mic pill (বাংলা → Auto, Auto stays Auto, left → English)
-- Category filters and automatic titles from the first five transcript words
-- "Today" / "Earlier" grouping, fresh-note coral flash, delete with Undo
-- 44-bar seekable player UI, playback speed, copy, native Android share
-- Category changes, adding more text/duration to an existing note
+- Voice-language switching by swiping the mic pill, or from Settings:
+  **বাংলা**, **English**, **Auto** (Whisper detects the language)
+- Real 16-bit mono WAV capture at 16 kHz (or the closest rate the phone supports)
+- Pause/resume without inserting silence into the recording
+- Live level meter driven by microphone amplitude
+- On-device transcription after you stop; long recordings are split into 28-second chunks
+- Audio-only notes are kept when the speech model cannot produce text
+- 44-bar seekable player, playback speed, copy, native Android share
+- Category changes, appending a new recording to an existing note
 - Toast messages, discard dialog, reduced-motion support, hardware back handling
-- Notes are persisted locally in the WebView's on-device storage, so they survive a restart
+- Notes and metadata survive a restart; audio files are stored in app-private storage
+- Export writes a UTF-8 text file through MediaStore on Android 10+ and through the legacy
+  Downloads permission on Android 7–9
 
-As requested for this demo, **recording, transcription, and audio playback are simulated**. A sample sentence appears word by word; the player moves through a generated waveform and time but does not produce sound. No microphone is accessed and no audio is stored yet.
+The first transcription can take a few seconds while the 100 MB model is loaded. Later notes
+are faster. Bengali accuracy from Whisper Tiny is usable but not perfect; the original audio is
+always kept so you can play it back.
+
+## Permissions
+
+| Permission | Why |
+| --- | --- |
+| `RECORD_AUDIO` | Record voice notes |
+| `WRITE_EXTERNAL_STORAGE` (`maxSdkVersion=28`) | Save exported text on Android 7–9 only |
+| `VIBRATE` | Short haptic feedback |
+
+There is **no `INTERNET` permission**. The app cannot send notes or audio anywhere.
 
 ## Build locally
 
 Requirements: JDK 17 and Android SDK 34.
 
+The speech engine and model are large binaries and are **not committed**. Fetch and verify them
+once:
+
 ```bash
-./gradlew :app:assembleDebug
+bash scripts/fetch-speech.sh
 ```
 
-The APK is written to:
+On Windows PowerShell:
 
-```text
-app/build/outputs/apk/debug/app-debug.apk
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\fetch-speech.ps1
+```
+
+Both scripts download:
+
+- `sherpa-onnx-2.0.2.aar` from the official sherpa-onnx release
+- `sherpa-onnx-whisper-tiny.tar.bz2`, extracting only the int8 encoder, decoder, and tokens
+
+Every file is checked against a pinned SHA-256 before it is used. Existing verified files are
+kept, so repeated runs do not download again.
+
+Then build:
+
+```bash
+./gradlew :app:assembleDebug
 ```
 
 On Windows:
@@ -53,31 +104,58 @@ On Windows:
 .\gradlew.bat :app:assembleDebug
 ```
 
+The APK is written to:
+
+```text
+app/build/outputs/apk/debug/app-debug.apk
+```
+
+The build targets `arm64-v8a` and `armeabi-v7a` only. Emulator x86 libraries are excluded to keep
+the download manageable.
+
 ## Project structure
 
 ```text
 app/src/main/
-├── AndroidManifest.xml             # VIBRATE only; no INTERNET permission
+├── AndroidManifest.xml             # microphone + legacy export permission; no INTERNET
 ├── java/com/kothanote/app/
-│   └── MainActivity.java           # WebView shell, local asset server, native bridge
+│   └── MainActivity.java           # WebView shell, recorder, Whisper bridge, playback, export
 ├── assets/
-│   ├── index.html                  # complete offline UI and demo logic
+│   ├── index.html                  # offline UI shell
+│   ├── app.js                      # real recording/transcription/player UI logic
 │   ├── bubble.png                  # hand-drawn speech bubble artwork
+│   ├── asr/                        # fetched Whisper Tiny int8 model (not committed)
 │   └── fonts/                      # bundled Poppins + Hind Siliguri WOFF2
 └── res/                            # light theme, launcher icons, splash
 ```
 
-The shell serves the bundled UI from `https://app.local/` by intercepting requests inside `MainActivity`, so there is no network traffic. Native methods provide clipboard, the Android share sheet, 12 ms haptics, reduced-motion detection, and hardware-back routing.
+The shell serves bundled files from `https://app.local/` by intercepting requests inside
+`MainActivity`, so there is no network traffic. Native methods provide recording, transcription,
+playback, clipboard, the Android share sheet, haptics, reduced-motion detection, and hardware-back
+routing.
 
-## Going from demo to real voice notes
+## CI and releases
 
-1. Add `RECORD_AUDIO` and runtime microphone permission; record with `MediaRecorder`/`AudioRecord`.
-2. Store notes in SQLite/Room with `id`, `category`, `createdAt`, `durationSeconds`, `transcript`, `audioPath`.
-3. Run an offline speech-to-text model (e.g. Whisper/Vosk) and stream partial words into the live transcript.
-4. Feed real microphone amplitude into the 36-bar waveform.
-5. Implement `Export all notes` with the Storage Access Framework or MediaStore Downloads.
-6. Replace the generated detail waveform with peaks extracted from the recorded audio file.
+`.github/workflows/build-apk.yml`:
+
+1. Restores cached AAR/model files, or downloads them with `scripts/fetch-speech.sh`.
+2. Verifies every SHA-256.
+3. Builds the debug APK and checks that the model and both phone ABIs are present.
+4. Uploads a run artifact when storage allows.
+5. Publishes `KothaNote-debug.apk` and its checksum to the `latest` release when the branch is
+   `main`.
+
+## Third-party components
+
+- **sherpa-onnx 2.0.2** — Apache-2.0
+- **ONNX Runtime** (bundled by sherpa-onnx) — MIT
+- **Whisper Tiny int8 model** — MIT (OpenAI Whisper)
+- **Poppins** — SIL Open Font License 1.1
+- **Hind Siliguri** — SIL Open Font License 1.1
+
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for links and license details.
 
 ## License
 
-MIT. The speech-bubble artwork is included with the project for this app.
+MIT for the KothaNote source code. The speech-bubble artwork is included with the project for
+this app.

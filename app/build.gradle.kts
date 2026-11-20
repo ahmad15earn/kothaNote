@@ -20,9 +20,23 @@ android {
         }
     }
 
+    signingConfigs {
+        // A stable debug key (kept in the repository on purpose) so every CI
+        // build has the same signature. Without it Android refuses to install
+        // an update over the previous release. This key is only for debug
+        // sideload builds; it must never be used for a Play Store release.
+        create("sharedDebug") {
+            storeFile = file("kothanote-debug.jks")
+            storePassword = "kothanote"
+            keyAlias = "kothanote"
+            keyPassword = "kothanote"
+        }
+    }
+
     buildTypes {
         debug {
             isDebuggable = true
+            signingConfig = signingConfigs.getByName("sharedDebug")
         }
         release {
             isMinifyEnabled = false
