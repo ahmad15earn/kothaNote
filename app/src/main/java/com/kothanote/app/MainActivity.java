@@ -17,6 +17,10 @@ import android.media.MediaPlayer;
 import android.media.MediaRecorder;
 import android.media.MediaScannerConnection;
 import android.media.PlaybackParams;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.NetworkRequest;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -27,6 +31,7 @@ import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.provider.MediaStore;
 import android.provider.Settings;
+import android.util.Base64;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
@@ -51,6 +56,7 @@ import org.json.JSONObject;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -59,10 +65,14 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.RandomAccessFile;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.net.URLEncoder;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -86,7 +96,22 @@ public class MainActivity extends Activity {
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private ExecutorService speechExecutor;
     private ExecutorService ioExecutor;
+    private ExecutorService cloudExecutor;
     private SpeechEngine speechEngine;
+    private ConnectivityManager.NetworkCallback networkCallback;
+
+    private final Object cloudLock = new Object();
+    private volatile String cloudState = "idle";
+    private volatile int cloudProgress = 0;
+    private volatile String cloudText = "";
+    private volatile String cloudError = "";
+    private volatile String cloudMessage = "";
+
+    private static final String CLOUD_PREFS = "kothanote.cloud";
+    private static final String CLOUD_KEY = "key";
+    private static final String CLOUD_MODEL = "model";
+    private static final String CLOUD_FLASH = "gemini-2.5-flash";
+    private static final String CLOUD_PRO = "gemini-2.5-pro";
 
     private final Object recorderLock = new Object();
     private Recorder recorder;
@@ -131,6 +156,7 @@ public class MainActivity extends Activity {
         }
         speechExecutor = Executors.newSingleThreadExecutor();
         ioExecutor = Executors.newSingleThreadExecutor();
+        cloudExecutor = Executors.newSingleThreadExecutor();
         speechEngine = new SpeechEngine();
 
         webView = new WebView(this);
@@ -175,6 +201,55 @@ public class MainActivity extends Activity {
         webView.setWebViewClient(new LocalClient());
         setContentView(webView);
         webView.loadUrl(START_URL);
+        watchNetwork();
+    }
+
+    private void watchNetwork() {
+        try {
+            ConnectivityManager cm =
+                    (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm == null) return;
+            NetworkRequest request = new NetworkRequest.Builder()
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    .build();
+            networkCallback = new ConnectivityManager.NetworkCallback() {
+                @Override
+                public void onAvailable(Network network) {
+                    notifyNetwork(isOnlineNow());
+                }
+
+                @Override
+                public void onLost(Network network) {
+                    notifyNetwork(isOnlineNow());
+                }
+
+                @Override
+                public void onCapabilitiesChanged(Network network, NetworkCapabilities caps) {
+                    notifyNetwork(isOnlineNow());
+                }
+            };
+            cm.registerNetworkCallback(request, networkCallback);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void notifyNetwork(boolean online) {
+        emitCallback("appNetwork", "{\"online\":" + online + "}");
+    }
+
+    private boolean isOnlineNow() {
+        try {
+            ConnectivityManager cm =
+                    (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm == null) return false;
+            Network network = cm.getActiveNetwork();
+            if (network == null) return false;
+            NetworkCapabilities caps = cm.getNetworkCapabilities(network);
+            return caps != null
+                    && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 
     private boolean isLocalUrl(Uri uri) {
@@ -501,11 +576,46 @@ public class MainActivity extends Activity {
             if (existing != null && existing.isFile()) {
                 append = existing.getName();
             }
-            speechEngine.transcribe(part, current.language, append, segmentMs);
-
+            // The recording is kept as-is. Transcription happens later,
+            // over the internet, while the phone sits on Wi-Fi or data.
             try {
                 out.put("ok", true);
+                out.put("file", part.getName());
+                out.put("durationMs", wavDurationMs(part));
+                out.put("append", append != null);
+                if (append != null) out.put("appendFile", append);
             } catch (Exception ignored) {
+            }
+            return out.toString();
+        }
+
+        @JavascriptInterface
+        public String mergeAudio(String existingFile, String partFile) {
+            JSONObject out = new JSONObject();
+            File existing = resolveAudio(existingFile);
+            File part = resolveAudio(partFile);
+            if (existing == null || part == null || !existing.isFile() || !part.isFile()) {
+                try {
+                    out.put("ok", false);
+                    out.put("error", "missing");
+                } catch (Exception ignored) {
+                }
+                return out.toString();
+            }
+            try {
+                concatenateWav(existing, part);
+                //noinspection ResultOfMethodCallIgnored
+                part.delete();
+                out.put("ok", true);
+                out.put("file", existing.getName());
+                out.put("durationMs", wavDurationMs(existing));
+            } catch (Throwable t) {
+                try {
+                    out.put("ok", false);
+                    out.put("error", "audio");
+                    out.put("message", "The recordings could not be joined.");
+                } catch (Exception ignored) {
+                }
             }
             return out.toString();
         }
@@ -519,6 +629,109 @@ public class MainActivity extends Activity {
             }
             if (current != null) current.cancel();
             setKeepAwake(false);
+        }
+
+        @JavascriptInterface
+        public boolean isOnline() {
+            return isOnlineNow();
+        }
+
+        @JavascriptInterface
+        public String cloudConfig() {
+            JSONObject out = new JSONObject();
+            try {
+                String key = cloudKey();
+                out.put("configured", !key.isEmpty());
+                out.put("masked", maskKey(key));
+                out.put("model", cloudModel());
+                out.put("online", isOnlineNow());
+            } catch (Exception ignored) {
+            }
+            return out.toString();
+        }
+
+        @JavascriptInterface
+        public void saveCloudConfig(String key, String model) {
+            String clean = key == null ? "" : key.trim();
+            String chosen = CLOUD_PRO.equals(model) ? CLOUD_PRO : CLOUD_FLASH;
+            android.content.SharedPreferences.Editor editor =
+                    getSharedPreferences(CLOUD_PREFS, MODE_PRIVATE).edit();
+            if (!clean.isEmpty()) editor.putString(CLOUD_KEY, clean);
+            editor.putString(CLOUD_MODEL, chosen).apply();
+        }
+
+        @JavascriptInterface
+        public void clearCloudConfig() {
+            getSharedPreferences(CLOUD_PREFS, MODE_PRIVATE)
+                    .edit()
+                    .remove(CLOUD_KEY)
+                    .apply();
+        }
+
+        @JavascriptInterface
+        public void openUrl(String url) {
+            if (url == null) return;
+            String value = url.trim();
+            if (!value.startsWith("https://")) return;
+            runOnUiThread(() -> {
+                try {
+                    startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(value)));
+                } catch (Exception ignored) {
+                }
+            });
+        }
+
+        @JavascriptInterface
+        public void startCloudTranscribe(String file, String language, String model) {
+            File audio = resolveAudio(file);
+            String key = cloudKey();
+            if (audio == null || !audio.isFile()) {
+                setCloudFailure("missing", "The recording is missing from this phone.");
+                return;
+            }
+            if (key.isEmpty()) {
+                setCloudFailure("nokey", "Add a free Gemini key in Settings first.");
+                return;
+            }
+            if (!isOnlineNow()) {
+                setCloudFailure("offline", "Waiting for the internet.");
+                return;
+            }
+            String chosen = CLOUD_PRO.equals(model) ? CLOUD_PRO : CLOUD_FLASH;
+            synchronized (cloudLock) {
+                if ("running".equals(cloudState)) return;
+                cloudState = "running";
+                cloudProgress = 3;
+                cloudText = "";
+                cloudError = "";
+                cloudMessage = "Starting…";
+            }
+            final String lang = normalizeLang(language);
+            cloudExecutor.execute(() -> runCloudJob(audio, lang, chosen, key));
+        }
+
+        @JavascriptInterface
+        public String cloudJobStatus() {
+            JSONObject out = new JSONObject();
+            try {
+                out.put("state", cloudState);
+                out.put("progress", cloudProgress);
+                out.put("text", cloudText);
+                out.put("error", cloudError);
+                out.put("message", cloudMessage);
+            } catch (Exception ignored) {
+            }
+            return out.toString();
+        }
+
+        @JavascriptInterface
+        public void cancelCloudTranscribe() {
+            synchronized (cloudLock) {
+                if ("running".equals(cloudState)) {
+                    cloudState = "idle";
+                    cloudMessage = "Cancelled";
+                }
+            }
         }
 
         @JavascriptInterface
@@ -1134,6 +1347,322 @@ public class MainActivity extends Activity {
     /* ---------------------------------------------------------------------
        On-device speech recognition
        --------------------------------------------------------------------- */
+
+    /* ---------------------------------------------------------------------
+       Cloud transcription (Gemini)
+       --------------------------------------------------------------------- */
+
+    private static final class CloudException extends Exception {
+        final String code;
+
+        CloudException(String code, String message) {
+            super(message);
+            this.code = code;
+        }
+    }
+
+    private String cloudKey() {
+        return getSharedPreferences(CLOUD_PREFS, MODE_PRIVATE)
+                .getString(CLOUD_KEY, "");
+    }
+
+    private String cloudModel() {
+        String model = getSharedPreferences(CLOUD_PREFS, MODE_PRIVATE)
+                .getString(CLOUD_MODEL, CLOUD_FLASH);
+        return CLOUD_PRO.equals(model) ? CLOUD_PRO : CLOUD_FLASH;
+    }
+
+    private static String maskKey(String key) {
+        if (key == null || key.isEmpty()) return "";
+        if (key.length() <= 4) return "••••";
+        return "••••" + key.substring(key.length() - 4);
+    }
+
+    private void setCloudFailure(String code, String message) {
+        synchronized (cloudLock) {
+            cloudState = "error";
+            cloudError = code;
+            cloudMessage = message;
+            cloudProgress = 0;
+        }
+    }
+
+    private void runCloudJob(File audio, String lang, String model, String key) {
+        try {
+            WavData wav = readWav(audio);
+            short[] samples = wav.sampleRate == 16000
+                    ? wav.samples : resample(wav.samples, wav.sampleRate, 16000);
+            if (samples.length < 1600) {
+                throw new CloudException("empty", "This recording is too short to transcribe.");
+            }
+            List<int[]> chunks = cloudChunks(samples, 16000);
+            if (chunks.isEmpty()) {
+                throw new CloudException("empty", "There is no speech in this recording.");
+            }
+            StringBuilder out = new StringBuilder();
+            for (int i = 0; i < chunks.size(); i++) {
+                if (!"running".equals(cloudState)) return;
+                int pct = 6 + Math.round(i * 88f / chunks.size());
+                synchronized (cloudLock) {
+                    cloudProgress = Math.min(94, pct);
+                    cloudMessage = chunks.size() > 1
+                            ? "Listening to part " + (i + 1) + " of " + chunks.size() + "…"
+                            : "Listening with Gemini…";
+                }
+                int[] range = chunks.get(i);
+                //noinspection SuspiciousSystemArraycopy
+                short[] slice = Arrays.copyOfRange(samples, range[0], range[1]);
+                String part = geminiTranscribe(key, model, wavBytes(slice, 16000), lang);
+                String cleaned = tidyTranscript(part);
+                if (!cleaned.isEmpty()) {
+                    if (out.length() > 0) out.append("\n\n");
+                    out.append(cleaned);
+                }
+            }
+            String text = tidyTranscript(out.toString());
+            if (text.isEmpty()) {
+                throw new CloudException("empty",
+                        "Gemini could not hear any words. The recording is safe.");
+            }
+            synchronized (cloudLock) {
+                if (!"running".equals(cloudState)) return;
+                cloudText = text;
+                cloudError = "";
+                cloudMessage = "Transcript ready";
+                cloudProgress = 100;
+                cloudState = "done";
+            }
+        } catch (CloudException e) {
+            setCloudFailure(e.code, e.getMessage());
+        } catch (Throwable t) {
+            setCloudFailure("network", friendlyCloudError(t));
+        }
+    }
+
+    private String geminiTranscribe(String key, String model, byte[] audio,
+                                    String lang) throws IOException, CloudException {
+        String endpoint = "https://generativelanguage.googleapis.com/v1beta/models/"
+                + model + ":generateContent?key="
+                + URLEncoder.encode(key, "UTF-8");
+        HttpURLConnection connection = null;
+        try {
+            JSONObject root = new JSONObject();
+            JSONArray contents = new JSONArray();
+            JSONObject content = new JSONObject();
+            JSONArray parts = new JSONArray();
+            parts.put(new JSONObject().put("text", cloudPrompt(lang)));
+            JSONObject inline = new JSONObject();
+            inline.put("mime_type", "audio/wav");
+            inline.put("data", Base64.encodeToString(audio, Base64.NO_WRAP));
+            parts.put(new JSONObject().put("inline_data", inline));
+            content.put("parts", parts);
+            contents.put(content);
+            root.put("contents", contents);
+            root.put("generationConfig", new JSONObject()
+                    .put("temperature", 0)
+                    .put("maxOutputTokens", 32768));
+            byte[] body = root.toString().getBytes(StandardCharsets.UTF_8);
+
+            connection = (HttpURLConnection) new URL(endpoint).openConnection();
+            connection.setRequestMethod("POST");
+            connection.setConnectTimeout(20000);
+            connection.setReadTimeout(240000);
+            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+            connection.setDoOutput(true);
+            connection.setFixedLengthStreamingMode(body.length);
+            try (OutputStream out = connection.getOutputStream()) {
+                out.write(body);
+                out.flush();
+            }
+
+            int status = connection.getResponseCode();
+            InputStream stream = status >= 400
+                    ? connection.getErrorStream() : connection.getInputStream();
+            String response = readStream(stream);
+            if (status != 200) {
+                String apiMessage = "HTTP " + status;
+                try {
+                    apiMessage = new JSONObject(response)
+                            .getJSONObject("error")
+                            .optString("message", apiMessage);
+                } catch (Exception ignored) {
+                }
+                String kind = status == 401 || status == 403 ? "auth"
+                        : status == 429 ? "quota" : "network";
+                String lower = apiMessage.toLowerCase(Locale.US);
+                if (status == 400 && lower.contains("api key")) kind = "auth";
+                throw new CloudException(kind, friendlyHttpMessage(status, apiMessage));
+            }
+
+            JSONObject json = new JSONObject(response);
+            JSONArray candidates = json.optJSONArray("candidates");
+            if (candidates == null || candidates.length() == 0) {
+                throw new CloudException("empty",
+                        "Gemini did not return a transcript. The note will retry.");
+            }
+            JSONObject first = candidates.getJSONObject(0);
+            String finish = first.optString("finishReason");
+            JSONObject contentOut = first.optJSONObject("content");
+            JSONArray outParts = contentOut == null
+                    ? null : contentOut.optJSONArray("parts");
+            StringBuilder text = new StringBuilder();
+            if (outParts != null) {
+                for (int i = 0; i < outParts.length(); i++) {
+                    String piece = outParts.getJSONObject(i).optString("text", "");
+                    if (!piece.isEmpty()) text.append(piece);
+                }
+            }
+            if (text.length() == 0) {
+                if ("SAFETY".equals(finish) || "PROHIBITED_CONTENT".equals(finish)) {
+                    throw new CloudException("blocked",
+                            "Gemini would not transcribe this recording.");
+                }
+                return "";
+            }
+            return text.toString();
+        } catch (CloudException e) {
+            throw e;
+        } catch (java.net.SocketTimeoutException e) {
+            throw new CloudException("network", "The internet is slow. The note will retry.");
+        } catch (java.net.UnknownHostException e) {
+            throw new CloudException("offline", "No internet right now. The note will retry.");
+        } catch (IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new CloudException("network", "The transcript could not be fetched.");
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
+
+    private static String cloudPrompt(String lang) {
+        StringBuilder prompt = new StringBuilder();
+        prompt.append("Transcribe the attached audio exactly as spoken. ");
+        if ("en".equals(lang)) {
+            prompt.append("The speaker is using English; write English words in English letters. ");
+        } else if ("bn".equals(lang)) {
+            prompt.append("The speaker is using Bengali; write Bengali in Bengali script. ");
+        } else {
+            prompt.append("Detect the spoken language and write it in its own script ")
+                    .append("(Bengali in Bengali script, English in English letters). ");
+        }
+        prompt.append("Never translate and never summarise. Keep every spoken word, ")
+                .append("including informal words and names. Add natural punctuation. ")
+                .append("Start a new paragraph wherever the speaker pauses clearly. ")
+                .append("If there is no speech, return nothing at all. ")
+                .append("Return only the transcript: no heading, no quotes, no explanation.");
+        return prompt.toString();
+    }
+
+    private static String readStream(InputStream stream) throws IOException {
+        if (stream == null) return "";
+        try (BufferedInputStream in = new BufferedInputStream(stream)) {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = in.read(buffer)) != -1) {
+                out.write(buffer, 0, read);
+            }
+            return out.toString("UTF-8");
+        }
+    }
+
+    private static String friendlyHttpMessage(int status, String apiMessage) {
+        String lower = apiMessage == null ? "" : apiMessage.toLowerCase(Locale.US);
+        if (status == 400 && (lower.contains("api key") || lower.contains("invalid"))) {
+            return "That Gemini key was not accepted. Check it in Settings.";
+        }
+        if (status == 401 || status == 403) {
+            return "Gemini refused the key. Check it in Settings.";
+        }
+        if (status == 429) {
+            return "Gemini's free limit is busy right now. The note will retry later.";
+        }
+        if (status == 404) {
+            return "This Gemini model is not available for your key. Try Fast in Settings.";
+        }
+        if (status >= 500) {
+            return "Gemini is busy right now. The note will retry later.";
+        }
+        return "Gemini could not transcribe this note. It will retry later.";
+    }
+
+    private static String friendlyCloudError(Throwable t) {
+        if (t instanceof java.net.SocketTimeoutException) {
+            return "The internet is slow. The note will retry.";
+        }
+        if (t instanceof java.net.UnknownHostException) {
+            return "No internet right now. The note will retry.";
+        }
+        return "The transcript could not be fetched. The note will retry.";
+    }
+
+    private static String tidyTranscript(String raw) {
+        if (raw == null) return "";
+        String value = raw.replace("\r\n", "\n").replace('\r', '\n').trim();
+        value = value.replaceAll("(?s)^```[a-zA-Z]*\\s*", "")
+                .replaceAll("(?s)\\s*```$", "").trim();
+        String[] blocks = value.split("\\n\\s*\\n");
+        StringBuilder out = new StringBuilder();
+        for (String block : blocks) {
+            String line = block.replace('\n', ' ').replaceAll("\\s+", " ").trim();
+            if (line.isEmpty()) continue;
+            if (line.matches("(?i)^(here is|this is|transcript[:\\-]).*")) continue;
+            if (out.length() > 0) out.append("\n\n");
+            out.append(line);
+        }
+        return out.toString().trim();
+    }
+
+    /**
+     * Cuts the recording into pieces small enough for Gemini's inline limit
+     * (6 minutes is about 15 MB after base64). Cuts land in the pauses that
+     * speechSegments already found, so no word is split in half.
+     */
+    private static List<int[]> cloudChunks(short[] samples, int sampleRate) {
+        List<int[]> chunks = new ArrayList<>();
+        if (samples.length == 0) return chunks;
+        int max = sampleRate * 60 * 6;
+        List<int[]> segments = speechSegments(samples, sampleRate);
+        if (segments.isEmpty()) {
+            chunks.add(new int[]{0, Math.min(samples.length, max)});
+            return chunks;
+        }
+        int start = -1;
+        int end = -1;
+        for (int[] segment : segments) {
+            int s = segment[0];
+            int e = segment[1];
+            while (s < e) {
+                int stop = Math.min(e, s + max);
+                if (start < 0) {
+                    start = s;
+                    end = stop;
+                } else if (stop - start <= max) {
+                    end = stop;
+                } else {
+                    chunks.add(new int[]{start, end});
+                    start = s;
+                    end = stop;
+                }
+                s = stop;
+            }
+        }
+        if (start >= 0) chunks.add(new int[]{start, end});
+        return chunks;
+    }
+
+    private static byte[] wavBytes(short[] samples, int sampleRate) {
+        byte[] header = wavHeader(samples.length * 2L, sampleRate, 1, 16);
+        ByteArrayOutputStream out = new ByteArrayOutputStream(
+                header.length + samples.length * 2);
+        out.write(header, 0, header.length);
+        for (short sample : samples) {
+            out.write(sample & 0xff);
+            out.write((sample >> 8) & 0xff);
+        }
+        return out.toByteArray();
+    }
 
     private final class SpeechEngine {
         private final Object lock = new Object();
@@ -1883,7 +2412,10 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
-        if (webView != null) webView.onResume();
+        if (webView != null) {
+            webView.onResume();
+            notifyNetwork(isOnlineNow());
+        }
     }
 
     @Override
@@ -1915,6 +2447,16 @@ public class MainActivity extends Activity {
         setKeepAwake(false);
         if (speechEngine != null) speechEngine.releaseAsync();
         if (speechExecutor != null) speechExecutor.shutdown();
+        if (cloudExecutor != null) cloudExecutor.shutdownNow();
+        if (networkCallback != null) {
+            try {
+                ConnectivityManager cm =
+                        (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+                if (cm != null) cm.unregisterNetworkCallback(networkCallback);
+            } catch (Throwable ignored) {
+            }
+            networkCallback = null;
+        }
         if (ioExecutor != null) ioExecutor.shutdownNow();
         if (webView != null) {
             webView.removeJavascriptInterface("Android");

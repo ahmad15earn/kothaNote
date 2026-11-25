@@ -60,15 +60,24 @@
     if (!n || typeof n !== 'object') return null;
     if (typeof n.id !== 'number' || typeof n.t !== 'number' || typeof n.d !== 'number') return null;
     if (typeof n.x !== 'string' || !CATS.includes(n.c)) return null;
-    if (typeof n.f !== 'string' || !AUDIO_RE.test(n.f)) return null;
-    return {
+    const f = typeof n.f === 'string' ? n.f : '';
+    if (f && !AUDIO_RE.test(f)) return null;
+    const pf = typeof n.pf === 'string' && AUDIO_RE.test(n.pf) ? n.pf : '';
+    if (!f && !pf && !n.x) return null;
+    const out = {
       id: n.id,
       c: n.c,
       t: n.t,
-      d: Math.max(0.5, n.d),
+      d: Math.max(0, n.d),
       x: n.x,
-      f: n.f
+      f
     };
+    if (n.p === 1 || n.p === true) out.p = 1;
+    if (pf) out.pf = pf;
+    if (n.l === 'bn' || n.l === 'en' || n.l === 'auto') out.l = n.l;
+    if (n.pl === 'bn' || n.pl === 'en' || n.pl === 'auto') out.pl = n.pl;
+    if (typeof n.e === 'string' && n.e) out.e = n.e;
+    return out;
   }
 
   function loadNotes() {
@@ -137,6 +146,199 @@
     renderUsage();
   }
 
+  /* ---------- cloud transcription ---------- */
+  const cloud = {
+    configured: false,
+    online: true,
+    masked: '',
+    model: 'gemini-2.5-flash',
+    busy: false,
+    poll: null,
+    timeout: null
+  };
+
+  function refreshCloud(repaint) {
+    if (!NATIVE) {
+      cloud.online = navigator.onLine !== false;
+      return;
+    }
+    let cfg = null;
+    try { cfg = nativeJson(window.Android.cloudConfig()); } catch (e) {}
+    if (cfg) {
+      cloud.configured = !!cfg.configured;
+      cloud.online = cfg.online !== false;
+      cloud.masked = cfg.masked || '';
+      cloud.model = cfg.model === 'gemini-2.5-pro' ? 'gemini-2.5-pro' : 'gemini-2.5-flash';
+    }
+    if (repaint !== false) paintCloudRow();
+  }
+
+  function pendingCount() {
+    return notes.filter(n => n.p && (n.pf || n.f)).length;
+  }
+
+  function cloudStatusText() {
+    if (!cloud.configured) return 'Set up';
+    if (!cloud.online) return 'Waiting for internet';
+    return 'On · Gemini';
+  }
+
+  function paintCloudRow() {
+    const row = $('#cloudStatus');
+    if (row) row.textContent = cloudStatusText();
+  }
+
+  function noteAudio(n) {
+    return n.pf || n.f || '';
+  }
+
+  function updateNoteIfOpen(n) {
+    if (current === 'detail' && curNoteId === n.id) openNote(n.id, true);
+  }
+
+  function finishCloudNote(n, text) {
+    if (!noteById(n.id)) return false;
+    let merged = false;
+    if (n.pf) {
+      let res = null;
+      try { res = nativeJson(window.Android.mergeAudio(n.f, n.pf)); } catch (e) {}
+      if (!res || !res.ok) {
+        n.e = 'The recording could not be joined. Tap to try again.';
+        saveNotes();
+        updateNoteIfOpen(n);
+        toast(n.e);
+        return false;
+      }
+      n.f = res.file || n.f;
+      n.d = Math.max(1, Math.round((Number(res.durationMs) || 0) / 1000));
+      delete n.pf;
+      merged = true;
+    }
+    const clean = String(text || '').trim();
+    if (!clean) {
+      n.e = 'No words were heard. The recording is safe.';
+      saveNotes();
+      updateNoteIfOpen(n);
+      return false;
+    }
+    n.x = (n.x ? n.x + '\n\n' : '') + clean;
+    delete n.p;
+    delete n.e;
+    delete n.pl;
+    if (typeof n.f !== 'string') n.f = '';
+    if (!n.d || n.d < 1) n.d = Math.max(1, Math.round(clean.split(/\s+/).length / 2.6));
+    saveNotes();
+    updateStorage();
+    homeDirty = false;
+    if (current === 'home') renderHome();
+    updateNoteIfOpen(n);
+    toast(merged ? 'Added to note' : 'Transcript ready');
+    return true;
+  }
+
+  function stopCloudPoll() {
+    clearInterval(cloud.poll);
+    clearTimeout(cloud.timeout);
+    cloud.poll = null;
+    cloud.timeout = null;
+    cloud.busy = false;
+  }
+
+  function startCloudNote(n) {
+    const file = noteAudio(n);
+    if (!file) return false;
+    try {
+      window.Android.startCloudTranscribe(file, n.pl || n.l || lang, cloud.model);
+    } catch (e) {
+      return false;
+    }
+    cloud.busy = true;
+    cloud.poll = setInterval(() => {
+      let st = null;
+      try { st = nativeJson(window.Android.cloudJobStatus()); } catch (e) {}
+      if (!st) return;
+      if (st.state === 'running') {
+        if (current === 'detail' && curNoteId === n.id) {
+          const pct = Number(st.progress) || 0;
+          $('#dX').textContent = (st.message || 'Transcribing with Gemini…')
+            + (pct > 0 ? ' ' + pct + '%' : '');
+        }
+        return;
+      }
+      stopCloudPoll();
+      if (st.state === 'done') {
+        finishCloudNote(n, st.text);
+        setTimeout(() => processQueue(false), 400);
+      } else if (st.state === 'error') {
+        n.e = st.message || 'The transcript could not be fetched.';
+        saveNotes();
+        updateNoteIfOpen(n);
+        if (current === 'home') renderHome();
+        toast(n.e);
+        const permanent = ['nokey', 'auth', 'blocked', 'empty', 'missing']
+          .indexOf(st.error) >= 0;
+        if (!permanent) {
+          setTimeout(() => {
+            if (cloud.online && !cloud.busy) processQueue(false);
+          }, 45000);
+        }
+      }
+    }, 600);
+    cloud.timeout = setTimeout(() => {
+      if (!cloud.busy) return;
+      stopCloudPoll();
+      try { window.Android.cancelCloudTranscribe(); } catch (e) {}
+    }, 12 * 60 * 1000);
+    return true;
+  }
+
+  function processQueue(manual, onlyId) {
+    if (!NATIVE) {
+      if (manual) toast('Cloud transcription works inside the Android app.');
+      return;
+    }
+    if (cloud.busy) {
+      if (manual) toast('Another note is still being transcribed.');
+      return;
+    }
+    refreshCloud(false);
+    const waiting = notes
+      .filter(n => n.p && (n.pf || n.f))
+      .sort((a, b) => a.t - b.t);
+    if (!waiting.length) {
+      if (manual) toast('Everything is transcribed.');
+      return;
+    }
+    const n = onlyId !== undefined
+      ? waiting.find(x => x.id === onlyId)
+      : waiting[0];
+    if (!n) {
+      if (manual) toast('This note is already transcribed.');
+      return;
+    }
+    if (!cloud.configured) {
+      if (manual) toast('Add a free Gemini key in Settings first.');
+      return;
+    }
+    if (!cloud.online) {
+      if (manual) toast('No internet yet. The note is saved and will wait.');
+      return;
+    }
+    delete n.e;
+    saveNotes();
+    startCloudNote(n);
+  }
+
+  window.appNetwork = function (state) {
+    if (state && typeof state.online !== 'undefined') {
+      cloud.online = !!state.online;
+    } else {
+      try { cloud.online = !!window.Android.isOnline(); } catch (e) {}
+    }
+    paintCloudRow();
+    if (cloud.online) processQueue(false);
+  };
+
   let lang = storeGet(LANG_KEY);
   if (!LANGS[lang]) lang = 'bn';
 
@@ -192,7 +394,8 @@
     $('#lg').textContent = LANGS[lang];
     $$('button', segLang).forEach(b => b.setAttribute('aria-pressed', String(b.dataset.lang === lang)));
     $('#fab').setAttribute('aria-label',
-      'Record a voice note. Voice language: ' + LANGS[lang] + '. Swipe to change language.');
+      'Record a voice note. Voice language: ' + LANGS[lang]
+      + '. Swipe up to type. Swipe sideways to change language.');
   }
 
   function setLang(l, announce) {
@@ -275,7 +478,9 @@
     row.appendChild(b);
 
     const p = document.createElement('p');
-    p.textContent = n.x || 'No transcript — tap to play the recording.';
+    p.textContent = n.p
+      ? (n.e || 'Waiting for internet to transcribe…')
+      : (n.x || 'No transcript — tap to play the recording.');
     row.appendChild(p);
 
     const meta = document.createElement('span');
@@ -301,8 +506,10 @@
   function renderHome(highlightId) {
     notes.sort((a, b) => b.t - a.t);
     const count = notes.length;
+    const waiting = pendingCount();
     $('#sub').textContent = count
-      ? count + (count === 1 ? ' note' : ' notes') + ' · ' + storageLabel() + ' on this device'
+      ? count + (count === 1 ? ' note' : ' notes') + ' · ' + storageLabel()
+        + ' on this device' + (waiting ? ' · ' + waiting + ' waiting' : '')
       : '';
     $('#empty').hidden = count > 0;
     $('#fl').hidden = count === 0;
@@ -356,9 +563,9 @@
     }
   }
 
-  /* ---------- mic language swipe ---------- */
+  /* ---------- mic language swipe + swipe up to type ---------- */
   const fab = $('#fab');
-  let sx = null, suppressClick = false;
+  let sx = null, sy = null, suppressClick = false;
 
   function swipeLang(dir) {
     if (dir > 0) setLang(lang === 'en' ? 'bn' : 'auto', true);
@@ -368,6 +575,7 @@
   fab.addEventListener('pointerdown', e => {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     sx = e.clientX;
+    sy = e.clientY;
     suppressClick = false;
     fab.classList.add('drag');
     try { fab.setPointerCapture(e.pointerId); } catch (err) {}
@@ -375,17 +583,30 @@
 
   fab.addEventListener('pointermove', e => {
     if (sx === null) return;
-    const dx = Math.max(-24, Math.min(24, (e.clientX - sx) * 0.45));
-    fab.style.transform = 'translateX(' + dx + 'px)';
+    const dx = e.clientX - sx;
+    const dy = e.clientY - sy;
+    if (dy < 0 && Math.abs(dy) > Math.abs(dx)) {
+      const lift = Math.max(-22, dy * 0.22);
+      fab.style.transform = 'translateY(' + lift + 'px)';
+    } else {
+      const shift = Math.max(-24, Math.min(24, dx * 0.45));
+      fab.style.transform = 'translateX(' + shift + 'px)';
+    }
   });
 
   function endSwipe(e) {
     if (sx === null) return;
     const dx = e.clientX - sx;
+    const dy = e.clientY - sy;
     sx = null;
+    sy = null;
     fab.classList.remove('drag');
     fab.style.transform = '';
-    if (Math.abs(dx) >= 40) {
+    if (dy <= -52 && Math.abs(dx) < 70) {
+      suppressClick = true;
+      setTimeout(() => { suppressClick = false; }, 450);
+      openType();
+    } else if (Math.abs(dx) >= 40) {
       suppressClick = true;
       swipeLang(dx > 0 ? 1 : -1);
       setTimeout(() => { suppressClick = false; }, 400);
@@ -395,6 +616,7 @@
   fab.addEventListener('pointercancel', () => {
     if (sx === null) return;
     sx = null;
+    sy = null;
     fab.classList.remove('drag');
     fab.style.transform = '';
   });
@@ -402,6 +624,65 @@
   fab.addEventListener('click', () => {
     if (suppressClick) { suppressClick = false; return; }
     requestRecording(null);
+  });
+
+  /* =========================================================
+     TYPE MODE — swipe up on the mic to write by hand
+     ========================================================= */
+  const typeEl = $('#type');
+  const tArea = $('#tArea');
+  let typeCat = 'Quick';
+  const typeChips = chipGroup($('#tcats'), CATS, c => {
+    typeCat = c;
+  });
+
+  function openType() {
+    if (rec.active || rec.stopping || current !== 'home') return;
+    typeCat = flt === 'All' ? 'Quick' : flt;
+    typeChips.set(typeCat);
+    tArea.value = '';
+    tArea.classList.remove('bn');
+    typeEl.classList.add('on');
+    typeEl.setAttribute('aria-hidden', 'false');
+    setTimeout(() => {
+      try { tArea.focus(); } catch (e) {}
+    }, reduceMotion ? 40 : 430);
+  }
+
+  function closeType() {
+    typeEl.classList.remove('on');
+    typeEl.setAttribute('aria-hidden', 'true');
+    try { tArea.blur(); } catch (e) {}
+  }
+
+  tArea.addEventListener('input', () => {
+    tArea.classList.toggle('bn', hasBn(tArea.value));
+  });
+
+  $('#tclose').addEventListener('click', closeType);
+
+  $('#tsave').addEventListener('click', () => {
+    const text = tArea.value.replace(/[ \t]+\n/g, '\n').trim();
+    if (!text) {
+      toast('Write something first.');
+      return;
+    }
+    const n = {
+      id: nextId++,
+      c: typeCat,
+      t: Date.now(),
+      d: 0,
+      x: text,
+      f: ''
+    };
+    notes.push(n);
+    saveNotes();
+    bumpUsage();
+    updateStorage();
+    closeType();
+    renderHome(n.id);
+    vibrate(10);
+    toast('Note saved');
   });
 
   /* =========================================================
@@ -593,18 +874,16 @@
     rec.ms = 0;
     rec.levels = Array(36).fill(0.06);
 
-    $('#recBadge').textContent = 'Offline · ' + LANGS[rec.lang];
+    $('#recBadge').textContent = 'On this phone · ' + LANGS[rec.lang];
     $('#rcats').hidden = rec.appendId !== null;
     recChips.set(rec.cat);
     paintRecTime();
     paintWave();
     syncPauseUI();
     $('#done').classList.remove('on', 'ok');
-    $('#dmsg').textContent = 'Listening closely…';
+    $('#dmsg').textContent = 'Saving the recording…';
     showRecSheet();
     startRecTimer();
-
-    try { window.Android.prepareSpeech(rec.lang); } catch (e) {}
   }
 
   function togglePause() {
@@ -647,8 +926,9 @@
 
     rec.stopping = true;
     syncPauseUI();
-    showDone('Listening closely…', false);
+    showDone('Saving the recording…', false);
 
+    const appendId = rec.appendId;
     let result = null;
     try { result = nativeJson(window.Android.stopRecording(rec.appendFile)); } catch (e) {}
     if (!result || !result.ok) {
@@ -663,7 +943,55 @@
       return;
     }
     rec.active = false;
-    rec.awaiting = true;
+    refreshCloud(false);
+
+    const duration = Math.max(1, Math.round((Number(result.durationMs) || 0) / 1000));
+    let n = appendId !== null ? noteById(appendId) : null;
+    if (n && n.f) {
+      // Keep the old audio until the new part has a transcript; then the two
+      // WAV files are joined so the player still has one recording.
+      n.pf = result.file;
+      n.pl = rec.lang;
+      n.p = 1;
+      delete n.e;
+    } else if (n) {
+      n.f = result.file;
+      n.d = duration;
+      n.pl = rec.lang;
+      n.p = 1;
+      delete n.e;
+    } else {
+      n = {
+        id: nextId++,
+        c: rec.cat,
+        t: Date.now(),
+        d: duration,
+        x: '',
+        f: result.file,
+        p: 1,
+        l: rec.lang
+      };
+      notes.push(n);
+    }
+    saveNotes();
+    bumpUsage();
+    updateStorage();
+
+    const wasDetail = current === 'detail';
+    showDone(cloud.configured ? 'Saved · transcript follows' : 'Saved · add a cloud key', true);
+    vibrate(10);
+    setTimeout(() => {
+      hideRecSheet();
+      resetRecUI();
+      if (wasDetail) openNote(n.id, true);
+      else renderHome(n.id);
+      if (!cloud.configured) {
+        toast('Saved. Add a free Gemini key in Settings to transcribe.');
+      } else if (!cloud.online) {
+        toast('Saved. It will transcribe when the internet comes back.');
+      }
+      processQueue(false);
+    }, 900);
   }
 
   function requestRecClose() {
@@ -926,9 +1254,29 @@
     pb.missing = false;
     $('#spd').textContent = '1×';
     $('#dT').textContent = titleOf(n.x);
-    $('#dM').textContent = stamp(n.t) + ' · ' + fmt(n.d);
-    $('#dX').textContent = n.x || 'No transcript for this note. The recording is still saved.';
+    const metaParts = [stamp(n.t)];
+    if (n.d > 0) metaParts.push(fmt(n.d));
+    $('#dM').textContent = metaParts.join(' · ');
+    const hasAudio = !!n.f;
+    $('#player').hidden = !hasAudio;
+    if (n.p) {
+      $('#dX').textContent = n.e
+        ? 'Waiting for the internet.\n\n' + n.e
+        : 'Waiting for the internet to transcribe this recording. '
+          + 'It will finish automatically on Wi-Fi or mobile data.';
+    } else if (n.x) {
+      $('#dX').textContent = n.x;
+    } else {
+      $('#dX').textContent = hasAudio
+        ? 'No transcript for this note. The recording is still saved.'
+        : 'No text yet.';
+    }
     $('#dX').classList.toggle('bn', hasBn(n.x));
+    $('#dTr').hidden = !n.p;
+    $('#dTr').textContent = !cloud.configured
+      ? 'Set up cloud transcription'
+      : (cloud.online ? 'Transcribe now' : 'Waiting for internet');
+    $('#dTr').disabled = cloud.configured && !cloud.online;
     $('#dD').textContent = fmt(n.d);
     $('#cT').textContent = '0:00';
     detailChips.set(n.c);
@@ -1103,7 +1451,11 @@
     pruneTimer = setTimeout(() => {
       pruneTimer = null;
       if (!NATIVE) return;
-      const names = notes.map(n => n.f).filter(Boolean);
+      const names = [];
+      notes.forEach(n => {
+        if (n.f) names.push(n.f);
+        if (n.pf) names.push(n.pf);
+      });
       try { window.Android.pruneAudio(JSON.stringify(names)); } catch (e) {}
       updateStorage();
     }, typeof delay === 'number' ? delay : 6500);
@@ -1140,8 +1492,23 @@
 
   $('#more').addEventListener('click', () => {
     if (curNoteId === null) return;
+    const n = noteById(curNoteId);
+    if (n && n.p) {
+      toast('Wait for this note to be transcribed first.');
+      return;
+    }
     releasePlayback();
     requestRecording(curNoteId);
+  });
+
+  $('#dTr').addEventListener('click', () => {
+    if (curNoteId === null) return;
+    if (!cloud.configured) {
+      go('settings', 'forward');
+      setTimeout(openCloudDialog, 480);
+      return;
+    }
+    processQueue(true, curNoteId);
   });
 
   $('#backDetail').addEventListener('click', closeDetail);
@@ -1240,6 +1607,105 @@
     });
   }
 
+  /* ---------- cloud transcription settings ---------- */
+  const cloudDlg = $('#cloudDlg');
+  const cloudKeyIn = $('#cloudKeyIn');
+  const cloudModelEl = $('#cloudModel');
+  let cloudModelChoice = 'gemini-2.5-flash';
+
+  [['gemini-2.5-flash', 'Fast'], ['gemini-2.5-pro', 'Best quality']].forEach(pair => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.dataset.model = pair[0];
+    b.textContent = pair[1];
+    b.setAttribute('aria-pressed', 'false');
+    cloudModelEl.appendChild(b);
+  });
+
+  function syncCloudModelUI() {
+    $$('button', cloudModelEl).forEach(b => {
+      b.setAttribute('aria-pressed', String(b.dataset.model === cloudModelChoice));
+    });
+  }
+
+  function refreshCloudDialog() {
+    refreshCloud();
+    cloudModelChoice = cloud.model;
+    syncCloudModelUI();
+    cloudKeyIn.value = '';
+    cloudKeyIn.placeholder = cloud.configured
+      ? 'Saved key ' + cloud.masked
+      : 'Paste Gemini API key';
+    const waiting = pendingCount();
+    $('#cloudMsg').textContent = !cloud.configured
+      ? 'Recordings stay on this phone until you add a free Gemini key.'
+      : !cloud.online
+        ? 'Key saved. Transcribing starts when the internet comes back.'
+        : waiting
+          ? waiting + (waiting === 1 ? ' note is' : ' notes are') + ' waiting to transcribe.'
+          : 'Ready. New recordings transcribe after you stop.';
+    $('#cloudRemove').hidden = !cloud.configured;
+  }
+
+  function openCloudDialog() {
+    refreshCloudDialog();
+    cloudDlg.classList.add('on');
+    cloudDlg.setAttribute('aria-hidden', 'false');
+    setTimeout(() => {
+      try { cloudKeyIn.focus(); } catch (e) {}
+    }, reduceMotion ? 40 : 260);
+  }
+
+  function closeCloudDialog() {
+    cloudDlg.classList.remove('on');
+    cloudDlg.setAttribute('aria-hidden', 'true');
+    try { cloudKeyIn.blur(); } catch (e) {}
+  }
+
+  $('#cloudRow').addEventListener('click', openCloudDialog);
+  $('#cloudClose').addEventListener('click', closeCloudDialog);
+  cloudDlg.addEventListener('click', e => {
+    if (e.target === cloudDlg) closeCloudDialog();
+  });
+  cloudModelEl.addEventListener('click', e => {
+    const b = e.target.closest('button[data-model]');
+    if (!b) return;
+    cloudModelChoice = b.dataset.model;
+    syncCloudModelUI();
+  });
+  $('#cloudSave').addEventListener('click', () => {
+    if (!NATIVE) {
+      toast('Cloud transcription works inside the Android app.');
+      return;
+    }
+    const key = cloudKeyIn.value.trim();
+    if (!key && !cloud.configured) {
+      $('#cloudMsg').textContent = 'Paste a Gemini key first.';
+      return;
+    }
+    if (key && key.length < 20) {
+      $('#cloudMsg').textContent = 'That key looks too short. Copy the whole key.';
+      return;
+    }
+    try { window.Android.saveCloudConfig(key, cloudModelChoice); } catch (e) {}
+    refreshCloudDialog();
+    toast(key ? 'Gemini key saved' : 'Quality saved');
+    if (key) {
+      closeCloudDialog();
+      setTimeout(() => processQueue(false), 500);
+    }
+  });
+  $('#cloudRemove').addEventListener('click', () => {
+    if (!NATIVE) return;
+    try { window.Android.clearCloudConfig(); } catch (e) {}
+    refreshCloudDialog();
+    toast('Gemini key removed');
+  });
+  $('#cloudGet').addEventListener('click', () => {
+    if (!NATIVE) return;
+    try { window.Android.openUrl('https://aistudio.google.com/apikey'); } catch (e) {}
+  });
+
   function exportText() {
     const ordered = notes.slice().sort((a, b) => b.t - a.t);
     const head = 'KothaNote — voice notes\nExported ' +
@@ -1249,8 +1715,9 @@
         year: 'numeric', month: 'short', day: 'numeric',
         hour: 'numeric', minute: '2-digit'
       });
-      return titleOf(n.x) + '\n' + when + ' · ' + n.c + ' · ' + fmt(n.d) +
-        '\n\n' + (n.x || '(no transcript)');
+      return titleOf(n.x) + '\n' + when + ' · ' + n.c +
+        (n.d > 0 ? ' · ' + fmt(n.d) : '') +
+        '\n\n' + (n.x || (n.p ? '(waiting for internet transcription)' : '(no transcript)'));
     }).join('\n\n---\n\n');
     return head + body + '\n';
   }
@@ -1294,6 +1761,7 @@
     updateStorage();
     syncNameUI();
     renderUsage();
+    refreshCloud();
     syncLangUI();
     $('#settings .body').scrollTop = 0;
     go('settings', 'forward');
@@ -1426,6 +1894,8 @@
 
   window.appBack = function () {
     if (animating) return true;
+    if (cloudDlg.classList.contains('on')) { closeCloudDialog(); return true; }
+    if (typeEl.classList.contains('on')) { closeType(); return true; }
     if (dlg.classList.contains('on')) { closeDialog(); return true; }
     if (recEl.classList.contains('on')) {
       if (rec.stopping || rec.awaiting) return true;
@@ -1445,19 +1915,19 @@
   updateStorage();
   syncNameUI();
   renderUsage();
+  refreshCloud();
   if (NATIVE) {
-    let status = null;
-    try { status = nativeJson(window.Android.speechStatus()); } catch (e) {}
-    if (status) {
-      speech = status;
-      paintSpeechStatus();
-    }
     // Remove recordings that no longer belong to any note. The native side
     // also keeps files younger than ten minutes, so this cannot touch a
     // recording that is still being transcribed.
     setTimeout(() => pruneUnusedAudio(0), 2500);
-  } else {
-    paintSpeechStatus();
+    // Anything saved without the internet finishes here.
+    setTimeout(() => processQueue(false), 1600);
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState !== 'visible') return;
+      refreshCloud();
+      processQueue(false);
+    });
   }
 
   splashTimer = setTimeout(enterHome, 2400);

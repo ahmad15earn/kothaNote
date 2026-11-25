@@ -253,6 +253,39 @@ h1,h2{font-weight:500;font-size:32px;line-height:1.15;letter-spacing:-.02em;marg
 .uday.today .fill{background:var(--acc);opacity:1}
 .uday em{font-style:normal;font-size:11px;line-height:1;color:var(--mute)}
 .uday.today em{color:var(--ink);font-weight:500}
+.cloudrow{width:100%;background:none;font:inherit;color:inherit;text-align:left}
+.cloudrow>span:last-child{color:var(--acc);font-weight:500}
+
+/* ---------- transcript actions ---------- */
+.tr{
+  width:100%;height:44px;margin:14px 0 0;border-radius:22px;
+  border:1px solid var(--line);font-size:13px;font-weight:500;
+}
+.tr[disabled]{opacity:.45}
+
+/* ---------- type mode ---------- */
+.badge.plain::before{display:none}
+.tArea{
+  flex:1;min-height:180px;margin:24px;padding:18px;
+  border:0;border-radius:22px;background:var(--card);color:var(--ink);
+  font:inherit;font-size:18px;line-height:1.9;resize:none;
+}
+.tArea::placeholder{color:var(--mute)}
+.tArea:focus{outline:2px solid var(--ink);outline-offset:-2px}
+.tArea.bn{line-height:2.05}
+#type .out{margin:0 24px calc(20px + env(safe-area-inset-bottom,0px))}
+
+/* ---------- cloud dialog ---------- */
+.cloud{text-align:left;max-height:calc(100% - 24px);overflow-y:auto}
+.cloud b{display:block;font-size:22px;font-weight:500;letter-spacing:-.01em}
+.cloud .cnote{margin:8px 0 12px;font-size:13px;font-weight:400;line-height:1.7;color:var(--mute)}
+.dlg .linkbtn{width:auto;height:40px;margin:0 0 6px;font-size:13px;color:var(--acc)}
+.cloud .nameIn{margin-top:6px}
+.cloud .seg{margin-top:12px}
+.cloud .cstat{margin:12px 0 4px;font-size:12px;font-weight:400;line-height:1.7;color:var(--mute);min-height:34px}
+.cloud .out{margin:12px 0 8px}
+.cloud .k{background:none;color:var(--mute);margin-bottom:0}
+.cloud #cloudRemove{color:var(--acc)}
 
 /* ---------- recording sheet ---------- */
 .sheet{
@@ -397,11 +430,11 @@ html.reduce-motion .okc path{stroke-dashoffset:0!important}
     <span>Tap the mic and just start talking.</span>
   </div>
   <div class="dock">
-    <button class="fab press" id="fab" type="button" aria-label="Record a voice note. Swipe right for Bangla, left for English">
+    <button class="fab press" id="fab" type="button" aria-label="Record a voice note. Swipe up to type. Swipe sideways to change language">
       <svg class="i" aria-hidden="true"><use href="#i-mic"/></svg>
       <span id="lg">বাংলা</span>
     </button>
-    <small>Tap to speak · swipe to change language</small>
+    <small>Tap to speak · swipe up to type</small>
   </div>
 </section>
 
@@ -427,7 +460,7 @@ html.reduce-motion .okc path{stroke-dashoffset:0!important}
     <h2 id="dT"></h2>
     <div class="meta" id="dM"></div>
     <div class="cats" id="dC" role="group" aria-label="Category" style="padding:16px 0 0"></div>
-    <div class="player">
+    <div class="player" id="player">
       <div class="prow">
         <button class="play press" id="pp" type="button" aria-label="Play recording">
           <svg class="i" aria-hidden="true"><use id="ppi" href="#i-play"/></svg>
@@ -441,6 +474,7 @@ html.reduce-motion .okc path{stroke-dashoffset:0!important}
     </div>
     <div class="lbl">Transcript</div>
     <p class="tx" id="dX"></p>
+    <button class="tr press" id="dTr" type="button" hidden>Transcribe now</button>
   </div>
   <div class="dock">
     <button class="pill press" id="more" type="button">
@@ -468,12 +502,16 @@ html.reduce-motion .okc path{stroke-dashoffset:0!important}
       <span>Voice language</span>
       <div class="seg" id="segLang" role="group" aria-label="Voice language"></div>
     </div>
+    <button class="set cloudrow press" id="cloudRow" type="button">
+      <span>Cloud transcription</span>
+      <span id="cloudStatus">Set up</span>
+    </button>
     <div class="usage" aria-label="Notes saved in the last seven days">
       <div class="uhead"><span>Last 7 days</span><span id="uSum">No notes yet</span></div>
       <div class="uchart" id="uChart"></div>
     </div>
     <button class="out press" id="exp" type="button">Export all notes</button>
-    <p class="note">Open source · No account · No internet needed.<br>Your notes and recordings never leave this phone.</p>
+    <p class="note">Open source · No account · Recordings stay on this phone.<br>Audio goes to Google only when cloud transcription is on.</p>
   </div>
 </section>
 
@@ -504,8 +542,23 @@ html.reduce-motion .okc path{stroke-dashoffset:0!important}
     <div class="okc" aria-hidden="true">
       <svg class="i"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>
     </div>
-    <p id="dmsg">Transcribing on your device…</p>
+    <p id="dmsg">Saving the recording…</p>
   </div>
+</section>
+
+<!-- ================= TYPE A NOTE ================= -->
+<section class="sheet" id="type" aria-label="Type a note" aria-hidden="true">
+  <div class="rtop">
+    <button class="ib press" id="tclose" type="button" aria-label="Close text mode">
+      <svg class="i" aria-hidden="true"><use href="#i-close"/></svg>
+    </button>
+    <span class="badge plain">Type a note</span>
+  </div>
+  <textarea class="tArea" id="tArea" rows="8" placeholder="Write anything…"
+            dir="auto" spellcheck="false" autocapitalize="sentences"
+            aria-label="Note text"></textarea>
+  <div class="cats rc" id="tcats" role="group" aria-label="Category"></div>
+  <button class="out press" id="tsave" type="button">Save note</button>
 </section>
 
 <!-- ================= DIALOG / TOAST ================= -->
@@ -514,6 +567,21 @@ html.reduce-motion .okc path{stroke-dashoffset:0!important}
     <p>Discard this recording?</p>
     <button class="k press" id="keep" type="button">Keep recording</button>
     <button class="d press" id="drop" type="button">Discard</button>
+  </div>
+</div>
+<div class="scrim" id="cloudDlg" aria-hidden="true">
+  <div class="dlg cloud" role="dialog" aria-modal="true" aria-label="Cloud transcription">
+    <b>Cloud transcription</b>
+    <p class="cnote">A recording goes to Google Gemini only when you ask for a
+      transcript. Everything else stays on this phone.</p>
+    <button class="linkbtn press" id="cloudGet" type="button">Get a free Gemini key ↗</button>
+    <input class="nameIn" id="cloudKeyIn" type="password" autocomplete="off"
+           spellcheck="false" placeholder="Paste Gemini API key" aria-label="Gemini API key">
+    <div class="seg" id="cloudModel" role="group" aria-label="Transcript quality"></div>
+    <p class="cstat" id="cloudMsg"></p>
+    <button class="out press" id="cloudSave" type="button">Save key</button>
+    <button class="k press" id="cloudRemove" type="button" hidden>Remove key</button>
+    <button class="k press" id="cloudClose" type="button">Close</button>
   </div>
 </div>
 <div class="toast" id="toast" role="status" aria-live="polite">

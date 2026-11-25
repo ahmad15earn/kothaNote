@@ -90,14 +90,16 @@ jobs:
           SIZE_MB=$(du -m KothaNote-debug.apk | cut -f1)
           SHA256=$(cut -d' ' -f1 KothaNote-debug.apk.sha256)
           cat > release-notes.md <<EOF
-          KothaNote — real offline voice notes
+          KothaNote — private voice notes, typed or spoken
 
           Built from \`$GITHUB_SHA\` on $(date -u +'%Y-%m-%d %H:%M UTC').
 
           - APK size: ${SIZE_MB} MB
           - SHA-256: \`${SHA256}\`
           - Android 7.0+ (arm64-v8a and armeabi-v7a)
-          - No internet permission. Recording, Whisper Tiny transcription and playback stay on the phone.
+          - Recordings are saved first and transcribed later. With a free Google
+            Gemini key, transcripts are made over Wi-Fi or mobile data; without
+            one, nothing leaves the phone.
 
           Download **KothaNote-debug.apk** below. The matching checksum is in **KothaNote-debug.apk.sha256**.
           EOF
